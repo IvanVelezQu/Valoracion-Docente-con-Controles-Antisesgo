@@ -3,10 +3,37 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Valoración Docente v0.2 — UdeA</title>
+    <title>Portal Universitario UdeA — Valoración Docente v0.2</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Merriweather:wght@400;700&family=Roboto:wght@300;400;500;700;900&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
-  </head>
-  <body class="bg-slate-100 min-h-screen">
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              udea: {
+                dark: '#0d2618',
+                primary: '#136538',
+                nav: '#3b6e38',
+                lime: '#6ea52d',
+                lightlime: '#8ab532',
+                gold: '#f9b218',
+                graytab: '#e6e7e8',
+                grayinactive: '#dcddde'
+              }
+            },
+            fontFamily: {
+              sans: ['Roboto', 'sans-serif'],
+              serif: ['Merriweather', 'serif']
+            }
+          }
+        }
+      }
+    </script>
+  <link rel="stylesheet" href="/src/index.css" /></head>
+  <body class="bg-white font-sans text-slate-800 min-h-screen">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
