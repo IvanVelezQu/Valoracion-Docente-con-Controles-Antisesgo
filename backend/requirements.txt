@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic[email]
+pydantic-settings
+sqlalchemy
+psycopg2-binary
+numpy
+pandas
+scikit-learn
+statsmodels
+factor-analyzer
+joblib
+faker
+pytest
+httpx
