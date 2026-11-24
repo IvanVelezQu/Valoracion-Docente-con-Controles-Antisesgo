@@ -3,6 +3,8 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import numpy as np
+from sqlalchemy import text
+from app.core.db import engine_control, engine_respuestas
 
 from app.core.config import settings
 from app.schemas.instrumento_v02 import (
@@ -32,21 +34,6 @@ app.add_middleware(
 
 motor_calidad = MotorCalidadAntisesgo(model_path=settings.MODEL_PATH)
 gestor_firma = GestorFirmaCiegaSimulado()
-
-# Almacenamiento en memoria para entorno de desarrollo local (simula las 2 BD separadas)
-BD_CONTROL_EMISIONES: set = set()
-BD_CONTROL_TOKENS_USADOS: set = set()
-BD_RESPUESTAS_FICHAS: Dict[str, FichaHechosCurso] = {
-    "ING-SIS-2026": FichaHechosCurso(
-        curso_codigo="ING-SIS-2026",
-        semestre="2026-2",
-        ref_01_plazo_cumplido=True,
-        ref_02_programa_detallado=True,
-        ref_03_asesorias_cumplidas=True,
-        dias_promedio_calificacion=4.5,
-    )
-}
-BD_RESPUESTAS_ENVIOS: List[Dict[str, Any]] = []
 
 
 class SolicitudTokenCiego(BaseModel):
@@ -80,17 +67,24 @@ def solicitar_token_ciego(req: SolicitudTokenCiego):
             detail=f"Solo se permiten cuentas institucionales @{settings.ALLOWED_EMAIL_DOMAIN}",
         )
 
-    llave_matricula = gestor_firma.hash_identificador(
-        f"{req.correo_institucional}:{req.curso_codigo}:{req.semestre}"
-    )
-    if llave_matricula in BD_CONTROL_EMISIONES:
+    email_hash = gestor_firma.hash_identificador(req.correo_institucional)
+
+    with engine_control.begin() as conn:
+        fila = conn.execute(text("""
+            INSERT INTO matriculas_curso
+                (estudiante_email_hash, curso_codigo, semestre, ya_solicito_token, fecha_emision_dia)
+            VALUES (:email_hash, :curso, :semestre, TRUE, CURRENT_DATE)
+            ON CONFLICT (estudiante_email_hash, curso_codigo, semestre) DO NOTHING
+            RETURNING id
+        """), {"email_hash": email_hash, "curso": req.curso_codigo, "semestre": req.semestre}).first()
+
+    if fila is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="El estudiante ya solicitó un token anónimo para este curso.",
         )
 
     firma_ciega = gestor_firma.emitir_firma_ciega(req.token_cegado)
-    BD_CONTROL_EMISIONES.add(llave_matricula)
     return {
         "curso_codigo": req.curso_codigo,
         "semestre": req.semestre,
@@ -111,32 +105,70 @@ def recibir_encuesta_anonima(envio: EnvioEncuestaV02):
         )
 
     token_hash = gestor_firma.hash_identificador(envio.token_anonimo)
-    if token_hash in BD_CONTROL_TOKENS_USADOS:
+
+    # 1. Leer la ficha del curso desde Neon
+    with engine_respuestas.connect() as conn:
+        f = conn.execute(text("""
+            SELECT * FROM fichas_hechos_curso
+            WHERE curso_codigo = :curso AND semestre = :semestre
+        """), {"curso": envio.curso_codigo, "semestre": envio.semestre}).mappings().first()
+
+    if f:
+        ficha = FichaHechosCurso(
+            curso_codigo=f["curso_codigo"], semestre=f["semestre"],
+            ref_01_plazo_cumplido=f["ref_01_plazo_cumplido"],
+            ref_02_programa_detallado=f["ref_02_programa_detallado"],
+            ref_03_asesorias_cumplidas=f["ref_03_asesorias_cumplidas"],
+            dias_promedio_calificacion=float(f["dias_promedio_calificacion"] or 5.0),
+        )
+    else:
+        ficha = FichaHechosCurso(
+            curso_codigo=envio.curso_codigo, semestre=envio.semestre,
+            ref_01_plazo_cumplido=True, ref_02_programa_detallado=True,
+            ref_03_asesorias_cumplidas=True,
+        )
+
+    resultado_calidad = motor_calidad.evaluar_envio(envio, ficha)
+
+    # 2. Marcar el token como usado en Supabase
+    with engine_control.begin() as conn:
+        usado = conn.execute(text("""
+            INSERT INTO tokens_consumidos (token_hash, curso_codigo, semestre)
+            VALUES (:token_hash, :curso, :semestre)
+            ON CONFLICT (token_hash) DO NOTHING
+            RETURNING token_hash
+        """), {"token_hash": token_hash, "curso": envio.curso_codigo,
+               "semestre": envio.semestre}).first()
+
+    if usado is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Este token anónimo ya fue utilizado.",
         )
 
-    ficha = BD_RESPUESTAS_FICHAS.get(
-        envio.curso_codigo,
-        FichaHechosCurso(
-            curso_codigo=envio.curso_codigo,
-            semestre=envio.semestre,
-            ref_01_plazo_cumplido=True,
-            ref_02_programa_detallado=True,
-            ref_03_asesorias_cumplidas=True,
-        ),
-    )
+    # 3. Guardar la respuesta anónima en Neon
+    datos = envio.model_dump(exclude={"token_anonimo", "firma_token"})
+    fila = {k.lower(): v for k, v in datos.items()}   # DIM_01 -> dim_01
+    calidad = resultado_calidad.model_dump()
+    for campo in ["desviacion_inversa_media", "bandera_inconsistencia_inversa",
+                  "bandera_contradiccion_hechos", "bandera_linea_recta",
+                  "bandera_demasiado_rapida", "bandera_revision_asesoria",
+                  "senal_arrastre_materia", "grupo_baja_exposicion",
+                  "prob_inconsistente", "peso_calidad", "aislado"]:
+        fila[campo] = calidad[campo]
 
-    resultado_calidad = motor_calidad.evaluar_envio(envio, ficha)
+    columnas = ", ".join(fila.keys())
+    valores = ", ".join(f":{k}" for k in fila.keys())
 
-    # Consumo atómico del token (BD de control) y registro anónimo (BD de respuestas)
-    BD_CONTROL_TOKENS_USADOS.add(token_hash)
-    BD_RESPUESTAS_ENVIOS.append({
-        "envio": envio.model_dump(exclude={"token_anonimo", "firma_token"}),
-        "calidad": resultado_calidad.model_dump(),
-    })
-
+    try:
+        with engine_respuestas.begin() as conn:
+            conn.execute(text(f"INSERT INTO envios_encuesta_v02 ({columnas}) VALUES ({valores})"), fila)
+    except Exception:
+        # Si Neon falla, devolvemos el token para que el estudiante pueda reintentar
+        with engine_control.begin() as conn:
+            conn.execute(text("DELETE FROM tokens_consumidos WHERE token_hash = :t"),
+                         {"t": token_hash})
+        raise HTTPException(status_code=500, detail="No se pudo guardar la encuesta. Intenta de nuevo.")
     return {
         "mensaje": "Encuesta anónima registrada correctamente (Instrumento v0.2).",
         "version_instrumento": "v0.2",
@@ -154,10 +186,19 @@ def obtener_dashboard_docente(curso_codigo: str, semestre: str = "2026-2"):
     Reporta mediana ponderada por w, distribución de frecuencias (boxplots/barras),
     porcentaje aislado y media cruda como referencia secundaria. Nunca genera rankings.
     """
+    with engine_respuestas.connect() as conn:
+        filas = conn.execute(text("""
+            SELECT * FROM envios_encuesta_v02
+            WHERE curso_codigo = :curso AND semestre = :semestre
+        """), {"curso": curso_codigo, "semestre": semestre}).mappings().all()
+
+    # Se adapta al formato que ya usaba el resto de la función
     envios_curso = [
-        r for r in BD_RESPUESTAS_ENVIOS
-        if r["envio"]["curso_codigo"] == curso_codigo
-        and r["envio"]["semestre"] == semestre
+        {
+            "envio": {k.upper(): v for k, v in r.items()},
+            "calidad": {"aislado": r["aislado"], "peso_calidad": float(r["peso_calidad"])},
+        }
+        for r in filas
     ]
 
     n_total = len(envios_curso)
