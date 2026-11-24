@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import './index.css';
 import { DashboardDocente, DatosDashboardCurso } from './components/DashboardDocente';
 import { FormularioEncuesta } from './components/FormularioEncuesta';
+const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 const MODULOS_UDEA = [
   { sigla: 'MAT', titulo: 'Proceso de matrícula', id: 'mat' },
@@ -24,7 +25,7 @@ const App = () => {
   const cargarDashboard = async () => {
     try {
       setErrorApi('');
-      const res = await fetch('http://127.0.0.1:8000/api/v1/dashboard/curso/ING-SIS-2026');
+      const res = await fetch(API + '/api/v1/dashboard/curso/ING-SIS-2026');
       if (!res.ok) throw new Error('Error al consultar el dashboard');
       setDatos(await res.json());
     } catch {
@@ -37,7 +38,7 @@ const App = () => {
       setErrorApi('');
       const id = Math.floor(Math.random() * 9000) + 1000;
       const tok = 'token_udea_' + id;
-      const res = await fetch('http://127.0.0.1:8000/api/v1/auth/solicitar-token-ciego', {
+      const res = await fetch(API + '/api/v1/auth/solicitar-token-ciego', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -62,7 +63,7 @@ const App = () => {
       for (let i = 1; i <= 6; i++) {
         const suffix = Math.floor(Math.random() * 90000) + 10000;
         const tok = `token_semilla_${i}_${suffix}`;
-        const r1 = await fetch('http://127.0.0.1:8000/api/v1/auth/solicitar-token-ciego', {
+        const r1 = await fetch(API + '/api/v1/auth/solicitar-token-ciego', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -74,7 +75,7 @@ const App = () => {
         });
         const { firma_ciega } = await r1.json();
         const esHalo = i === 6;
-        await fetch('http://127.0.0.1:8000/api/v1/encuestas/enviar', {
+        await fetch(API + '/api/v1/encuestas/enviar', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -310,7 +311,7 @@ const App = () => {
             cursoCodigo="ING-SIS-2026"
             tokenAnonimo={credencial.token}
             firmaToken={credencial.firma}
-            apiUrl="http://127.0.0.1:8000"
+            apiUrl={API}
           />
         )}
       </div>
