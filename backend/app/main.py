@@ -1,8 +1,17 @@
-from typing import Dict, List, Any
-from fastapi import FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from pathlib import Path
+from typing import Dict, List, Any, Optional
+
+from dotenv import load_dotenv
+
+# Carga las variables de entorno antes de importar módulos de la aplicación
+BASE_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BASE_DIR / ".env")
+load_dotenv()
+
 import numpy as np
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr, Field
 
 from app.core.config import settings
 from app.schemas.instrumento_v02 import (
@@ -10,8 +19,9 @@ from app.schemas.instrumento_v02 import (
     FichaHechosCurso,
     ORDEN_PRESENTACION_V02,
 )
-from app.services.motor_calidad import MotorCalidadAntisesgo
+from app.services.auth_supabase import verificar_usuario_udea
 from app.services.firma_ciega import GestorFirmaCiegaSimulado
+from app.services.motor_calidad import MotorCalidadAntisesgo
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -30,7 +40,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-motor_calidad = MotorCalidadAntisesgo(model_path=settings.MODEL_PATH)
+model_path = Path(settings.MODEL_PATH)
+if not model_path.is_absolute() and not model_path.exists():
+    model_path = (BASE_DIR / settings.MODEL_PATH).resolve()
+
+motor_calidad = MotorCalidadAntisesgo(model_path=str(model_path))
 gestor_firma = GestorFirmaCiegaSimulado()
 
 # Almacenamiento en memoria para entorno de desarrollo local (simula las 2 BD separadas)
@@ -50,10 +64,10 @@ BD_RESPUESTAS_ENVIOS: List[Dict[str, Any]] = []
 
 
 class SolicitudTokenCiego(BaseModel):
-    correo_institucional: EmailStr
-    curso_codigo: str
+    correo_institucional: Optional[EmailStr] = None
+    curso_codigo: str = Field(..., min_length=2, max_length=32)
     semestre: str = "2026-2"
-    token_cegado: str
+    token_cegado: str = Field(..., min_length=16)
 
 
 @app.get("/health")
@@ -68,20 +82,29 @@ def health_check():
 
 
 @app.post("/api/v1/auth/solicitar-token-ciego")
-def solicitar_token_ciego(req: SolicitudTokenCiego):
+async def solicitar_token_ciego(
+    req: SolicitudTokenCiego,
+    correo_verificado: str = Depends(verificar_usuario_udea),
+):
     """
-    Paso 1 y 2: Valida correo @udea.edu.co en la BD de Control y emite firma ciega
-    sin asociar el token a las respuestas futuras.
+    Paso 1 y 2: Valida el JWT de Supabase (@udea.edu.co) mediante verificar_usuario_udea
+    y emite una firma ciega sin asociar el token a las respuestas futuras.
     """
-    dominio = req.correo_institucional.split("@")[-1].lower()
+    dominio = correo_verificado.split("@")[-1].lower()
     if dominio != settings.ALLOWED_EMAIL_DOMAIN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Solo se permiten cuentas institucionales @{settings.ALLOWED_EMAIL_DOMAIN}",
         )
 
+    if req.correo_institucional and req.correo_institucional.lower() != correo_verificado.lower():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El correo de la solicitud no coincide con la cuenta institucional autenticada.",
+        )
+
     llave_matricula = gestor_firma.hash_identificador(
-        f"{req.correo_institucional}:{req.curso_codigo}:{req.semestre}"
+        f"{correo_verificado}:{req.curso_codigo}:{req.semestre}"
     )
     if llave_matricula in BD_CONTROL_EMISIONES:
         raise HTTPException(
